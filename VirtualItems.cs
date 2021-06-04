@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.1.0")]
+    [Info("Virtual Items", "WhiteThunder", "0.1.1")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -41,9 +41,6 @@ namespace Oxide.Plugins
                 if (perm != null)
                     permission.RegisterPermission(perm, this);
             }
-
-            if (!_pluginConfig.RefundCraftIngredients)
-                Unsubscribe(nameof(OnItemCraft));
         }
 
         private void Unload()
@@ -174,13 +171,38 @@ namespace Oxide.Plugins
             return false;
         }
 
-        private object CanCraft(ItemCrafter itemCrafter, ItemBlueprint blueprint, int amount, bool free)
+        private object OnIngredientsCollect(ItemCrafter itemCrafter, ItemBlueprint blueprint, ItemCraftTask task, int amount, BasePlayer player)
+        {
+            var ruleset = GetPlayerRuleset(player.UserIDString);
+            if (ruleset == null)
+                return null;
+
+            var collect = new List<Item>();
+            ruleset.TakeFromContainers(itemCrafter.containers, blueprint.ingredients, amount, collect);
+
+            // Re-implementing some vanilla logic.
+            task.potentialOwners = new List<ulong>();
+            foreach (var item in collect)
+            {
+                item.CollectedForCrafting(player);
+                if (!task.potentialOwners.Contains(player.userID))
+                {
+                    task.potentialOwners.Add(player.userID);
+                }
+            }
+            task.takenItems = collect;
+
+            // Return non-null to skip vanilla ingredient collection.
+            return false;
+        }
+
+        private object CanCraft(ItemCrafter itemCrafter, ItemBlueprint blueprint, int craftAmount, bool free)
         {
             var ruleset = GetPlayerRuleset(itemCrafter.baseEntity.UserIDString);
             if (ruleset == null)
                 return null;
 
-            var args = new object[] { itemCrafter, blueprint, amount, free };
+            var args = new object[] { itemCrafter, blueprint, craftAmount, free };
 
             object otherPluginResult;
             if (PluginReturnedResult(CraftSpamBlocker, nameof(CanCraft), out otherPluginResult, args)
@@ -200,40 +222,12 @@ namespace Oxide.Plugins
                 foreach (var container in itemCrafter.containers)
                     playerAmount += container.GetAmount(itemAmount.itemid, onlyUsableAmounts: true);
 
-                if (playerAmount < itemAmount.amount)
+                if (playerAmount < itemAmount.amount * craftAmount)
                     return false;
             }
 
             // Return non-null to force craft, skipping vanilla validation.
             return true;
-        }
-
-        private void OnItemCraft(ItemCraftTask task, BasePlayer owner, Item fromTempBlueprint)
-        {
-            var ruleset = GetPlayerRuleset(owner.UserIDString);
-            if (ruleset == null)
-                return;
-
-            foreach (var takenItem in task.takenItems)
-            {
-                var freeAmount = ruleset.GetFreeAmount(takenItem.info);
-
-                var refundAmount = Math.Min(freeAmount, takenItem.amount);
-                if (refundAmount >= 0)
-                {
-                    var refundItem = ItemManager.CreateByItemID(takenItem.info.itemid, refundAmount, takenItem.skin);
-                    if (refundItem == null)
-                        continue;
-
-                    if (!owner.inventory.GiveItem(refundItem))
-                    {
-                        refundItem.Remove();
-                        continue;
-                    }
-
-                    takenItem.amount -= refundAmount;
-                }
-            }
         }
 
         #endregion
@@ -347,9 +341,6 @@ namespace Oxide.Plugins
 
         private class Configuration : SerializableConfiguration
         {
-            [JsonProperty("RefundCraftIngredients")]
-            public bool RefundCraftIngredients = true;
-
             [JsonProperty("Rulesets")]
             public Ruleset[] Rulesets = new Ruleset[]
             {
@@ -486,6 +477,9 @@ namespace Oxide.Plugins
             public int GetFreeAmount(ItemAmount itemAmount) =>
                 GetFreeAmount(itemAmount.itemDef);
 
+            public int GetChargeAmount(ItemAmount itemAmount, int quantity = 1) =>
+                (int)itemAmount.amount * quantity - GetFreeAmount(itemAmount);
+
             public bool PlayerHasAmount(BasePlayer player, ItemDefinition itemDefinition, int requiredAmount)
             {
                 var freeAmount = GetFreeAmount(itemDefinition);
@@ -507,12 +501,12 @@ namespace Oxide.Plugins
 
             public void TakePlayerItem(List<Item> collect, BasePlayer player, ItemAmount itemAmount)
             {
-                var amountToTake = (int)itemAmount.amount - GetFreeAmount(itemAmount);
-                if (amountToTake <= 0)
+                var chargeAmount = GetChargeAmount(itemAmount);
+                if (chargeAmount <= 0)
                     return;
 
-                player.inventory.Take(collect, itemAmount.itemDef.itemid, amountToTake);
-                player.Command("note.inv", itemAmount.itemDef.itemid, amountToTake * -1);
+                player.inventory.Take(collect, itemAmount.itemDef.itemid, chargeAmount);
+                player.Command("note.inv", itemAmount.itemDef.itemid, chargeAmount * -1);
             }
 
             public void TakePlayerItemList(BasePlayer player, IEnumerable<ItemAmount> itemAmountList)
@@ -526,6 +520,23 @@ namespace Oxide.Plugins
                     item.Remove();
 
                 Facepunch.Pool.FreeList(ref collect);
+            }
+
+            public void TakeFromContainers(IEnumerable<ItemContainer> containerList, IEnumerable<ItemAmount> itemAmountList, int craftAmount, List<Item> collect)
+            {
+                foreach (var itemAmount in itemAmountList)
+                {
+                    var chargeAmount = GetChargeAmount(itemAmount, craftAmount);
+                    if (chargeAmount <= 0)
+                        continue;
+
+                    foreach (var container in containerList)
+                    {
+                        chargeAmount -= container.Take(collect, itemAmount.itemid, chargeAmount);
+                        if (chargeAmount <= 0)
+                            break;
+                    }
+                }
             }
         }
 

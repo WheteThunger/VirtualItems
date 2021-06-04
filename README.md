@@ -37,7 +37,6 @@ The following permissions come with the plugin's **default configuration**.
 
 ```json
 {
-  "RefundCraftIngredients": true,
   "Rulesets": [
     {
       "Name": "build",
@@ -136,7 +135,6 @@ The following permissions come with the plugin's **default configuration**.
 }
 ```
 
-- `RefundCraftIngredients` (`true` or `false`) -- While `true`, the plugin will try to refund crafting ingredients if they should have been free or discounted. Set to `false` to avoid conflicts or double refunds when using other plugins that also refund crafting ingredients (such as for blocking items).
 - `Rulesets` -- List of permission-based rulesets that determine how many of each ingredient players can have for free. Each ruleset defined here generates a permission of the format `virtualitems.ruleset.<name>`. Granting a ruleset to a player determines which ingredients they will have for free. Granting multiple rulesets to a player will cause only the last to apply (based on the order in the config).
   - `Name` -- Name of the ruleset. This determines the generated permission: `virtualitems.ruleset.<name>`.
   - `ItemAmounts` -- This map determines the amount of each ingredient (item short name) that players with this ruleset will have.
