@@ -227,16 +227,6 @@ namespace Oxide.Plugins
 
         #endregion
 
-        #region Utilities
-
-        private static class StringUtils
-        {
-            public static bool Equals(string a, string b) =>
-                string.Compare(a, b, StringComparison.OrdinalIgnoreCase) == 0;
-        }
-
-        #endregion
-
         #region Configuration
 
         [JsonObject(MemberSerialization.OptIn)]
