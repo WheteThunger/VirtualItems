@@ -1,31 +1,31 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Newtonsoft.Json.Serialization;
 using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using UnityEngine;
+using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.1.1")]
+    [Info("Virtual Items", "WhiteThunder", "0.2.0")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
         #region Fields
 
+        private const string PermissionRulesetPrefix = "virtualitems.ruleset";
+
         [PluginReference]
-        Plugin BGrade, CraftSpamBlocker, FreeBuild, ItemPuller, Guardian, NoCraft, NoEscape, TimedProgression, VerificationGatekeeper, ZoneManager;
+        private readonly Plugin ItemRetriever;
 
-        private static VirtualItems _pluginInstance;
-        private static Configuration _pluginConfig;
+        private Configuration _config;
+        private RulesetManager _rulesetManager;
 
-        private const string PermissionRulesetFormat = "virtualitems.ruleset.{0}";
-
-        private const int FirstInvisibleItemSlot = 24;
-
-        private readonly Dictionary<string, Item> _items = new Dictionary<string, Item>();
+        public VirtualItems()
+        {
+            _rulesetManager = new RulesetManager(this);
+        }
 
         #endregion
 
@@ -33,329 +33,368 @@ namespace Oxide.Plugins
 
         private void Init()
         {
-            _pluginInstance = this;
-
-            foreach (var ruleset in _pluginConfig.Rulesets)
-            {
-                var perm = ruleset.GetPermission();
-                if (perm != null)
-                    permission.RegisterPermission(perm, this);
-            }
-        }
-
-        private void Unload()
-        {
-            foreach (var item in _items.Values)
-                item.Remove();
-
-            _pluginConfig = null;
-            _pluginInstance = null;
+            _config.Init(this);
         }
 
         private void OnServerInitialized()
         {
-            CreateItems();
-
-            foreach (var player in BasePlayer.activePlayerList)
-                player.Invoke(
-                    () => player.inventory.SendUpdatedInventory(PlayerInventory.Type.Main, player.inventory.containerMain),
-                    UnityEngine.Random.Range(0f, 1f)
-                );
-        }
-
-        private void OnEntitySaved(BasePlayer player, BaseNetworkable.SaveInfo saveInfo)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return;
-
-            AddItems(saveInfo.msg.basePlayer.inventory.invMain, ruleset);
-        }
-
-        private void OnInventoryNetworkUpdate(PlayerInventory inventory, ItemContainer container, ProtoBuf.UpdateItemContainer updatedItemContainer, PlayerInventory.Type inventoryType)
-        {
-            if (inventoryType != PlayerInventory.Type.Main)
-                return;
-
-            var ruleset = GetPlayerRuleset(inventory.baseEntity.UserIDString);
-            if (ruleset == null)
-                return;
-
-            AddItems(updatedItemContainer.container[0], ruleset);
-        }
-
-        // Placing construction blocks.
-        private object CanAffordToPlace(BasePlayer player, Planner planner, Construction component)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var args = new object[] { player, planner, component };
-
-            object otherPluginResult;
-            if (PluginReturnedResult(VerificationGatekeeper, nameof(CanAffordToPlace), out otherPluginResult, args)
-                || PluginReturnedResult(FreeBuild, nameof(CanAffordToPlace), out otherPluginResult, args)
-                || PluginReturnedResult(ItemPuller, nameof(OnPayForPlacement), out otherPluginResult, args))
-                return otherPluginResult;
-
-            if (!ruleset.PlayerHasAmountList(player, component.defaultGrade.costToBuild))
-                return false;
-
-            // Return true to allow placement, skipping vanilla validation.
-            return true;
-        }
-
-        // Placing construction blocks or deployables.
-        private object OnPayForPlacement(BasePlayer player, Planner planner, Construction component)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var args = new object[] { player, planner, component };
-
-            object otherPluginResult;
-            if (PluginReturnedResult(VerificationGatekeeper, nameof(OnPayForPlacement), out otherPluginResult, args)
-                || PluginReturnedResult(FreeBuild, nameof(OnPayForPlacement), out otherPluginResult, args))
-                return otherPluginResult;
-
-            if (planner.isTypeDeployable)
-                return null;
-
-            ruleset.TakePlayerItemList(player, component.defaultGrade.costToBuild);
-
-            if (PluginReturnedResult(BGrade, nameof(OnPayForPlacement), out otherPluginResult, args))
-                return otherPluginResult;
-
-            // Return non-null to force the placement, skipping vanilla charges.
-            return false;
-        }
-
-        // Upgrading construction blocks.
-        private object CanAffordUpgrade(BasePlayer player, BuildingBlock block, BuildingGrade.Enum iGrade)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var args = new object[] { player, block, iGrade };
-
-            object otherPluginResult;
-            if (PluginReturnedResult(VerificationGatekeeper, nameof(OnPayForPlacement), out otherPluginResult, args))
-                return otherPluginResult;
-
-            if (!ruleset.PlayerHasAmountList(player, block.GetGrade(iGrade).costToBuild))
-                return false;
-
-            // Return true to allow placement, skipping vanilla validation.
-            return true;
-        }
-
-        // Upgrading construction blocks.
-        private object OnPayForUpgrade(BasePlayer player, BuildingBlock block, ConstructionGrade grade)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var args = new object[] { player, block, grade };
-
-            object otherPluginResult;
-            if (PluginReturnedResult(FreeBuild, nameof(OnPayForPlacement), out otherPluginResult, args))
-                return otherPluginResult;
-
-            ruleset.TakePlayerItemList(player, grade.costToBuild);
-
-            // Return non-null to force the placement, skipping vanilla charges.
-            return false;
-        }
-
-        private object OnIngredientsCollect(ItemCrafter itemCrafter, ItemBlueprint blueprint, ItemCraftTask task, int amount, BasePlayer player)
-        {
-            var ruleset = GetPlayerRuleset(player.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var collect = new List<Item>();
-            ruleset.TakeFromContainers(itemCrafter.containers, blueprint.ingredients, amount, collect);
-
-            // Re-implementing some vanilla logic.
-            task.potentialOwners = new List<ulong>();
-            foreach (var item in collect)
+            if (ItemRetriever == null)
             {
-                item.CollectedForCrafting(player);
-                if (!task.potentialOwners.Contains(player.userID))
-                {
-                    task.potentialOwners.Add(player.userID);
-                }
-            }
-            task.takenItems = collect;
-
-            // Return non-null to skip vanilla ingredient collection.
-            return false;
-        }
-
-        private object CanCraft(ItemCrafter itemCrafter, ItemBlueprint blueprint, int craftAmount, bool free)
-        {
-            var ruleset = GetPlayerRuleset(itemCrafter.baseEntity.UserIDString);
-            if (ruleset == null)
-                return null;
-
-            var args = new object[] { itemCrafter, blueprint, craftAmount, free };
-
-            object otherPluginResult;
-            if (PluginReturnedResult(CraftSpamBlocker, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(Guardian, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(ItemPuller, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(NoCraft, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(NoEscape, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(TimedProgression, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(VerificationGatekeeper, nameof(CanCraft), out otherPluginResult, args)
-                || PluginReturnedResult(ZoneManager, nameof(CanCraft), out otherPluginResult, args))
-                return otherPluginResult;
-
-            foreach (var itemAmount in blueprint.ingredients)
-            {
-                var playerAmount = ruleset.GetFreeAmount(itemAmount);
-
-                foreach (var container in itemCrafter.containers)
-                    playerAmount += container.GetAmount(itemAmount.itemid, onlyUsableAmounts: true);
-
-                if (playerAmount < itemAmount.amount * craftAmount)
-                    return false;
+                LogError($"{nameof(ItemRetriever)} is not installed. This plugin will not function until {nameof(ItemRetriever)} loads.");
+                return;
             }
 
-            // Return non-null to force craft, skipping vanilla validation.
-            return true;
+            RegisterAsItemSupplier();
+
+            UpdatePlayerInventories();
         }
 
-        #endregion
+        private void Unload()
+        {
+            UpdatePlayerInventories();
+        }
 
-        #region API
+        private void OnPluginLoaded(Plugin plugin)
+        {
+            if (plugin.Name == nameof(ItemRetriever))
+            {
+                RegisterAsItemSupplier();
+            }
+        }
 
-        private Dictionary<string, int> API_GetItemAmounts(string userId) =>
-            GetPlayerRuleset(userId)?.ItemAmounts;
+        private void OnPlayerDisconnected(BasePlayer player)
+        {
+            _rulesetManager.Remove(player);
+        }
+
+        private void OnGroupPermissionGranted(string groupName, string perm)
+        {
+            if (perm.StartsWith(PermissionRulesetPrefix))
+            {
+                _rulesetManager.Clear();
+            }
+        }
+
+        private void OnGroupPermissionRevoked(string groupName, string perm)
+        {
+            if (perm.StartsWith(PermissionRulesetPrefix))
+            {
+                _rulesetManager.Clear();
+            }
+        }
+
+        private void OnUserPermissionGranted(string userId, string perm)
+        {
+            if (perm.StartsWith(PermissionRulesetPrefix))
+            {
+                _rulesetManager.Clear();
+            }
+        }
+
+        private void OnUserPermissionRevoked(string userId, string perm)
+        {
+            if (perm.StartsWith(PermissionRulesetPrefix))
+            {
+                _rulesetManager.Clear();
+            }
+        }
 
         #endregion
 
         #region Helper Methods
 
-        private int Clamp(int x, int min, int max) => Math.Max(min, Math.Min(x, max));
-
-        private bool PluginReturnedResult(Plugin plugin, string hookName, out object result, params object[] args)
+        private static void SendInventoryUpdate(BasePlayer player)
         {
-            result = VerificationGatekeeper?.Call("CanAffordToPlace", args);
-            return result != null;
+            player.inventory.SendUpdatedInventory(PlayerInventory.Type.Main, player.inventory.containerMain);
         }
 
-        private void CreateItems()
+        private static void UpdatePlayerInventories()
         {
-            foreach (var ruleset in _pluginConfig.Rulesets)
+            foreach (var player in BasePlayer.activePlayerList)
             {
-                foreach (var shortName in ruleset.ItemAmounts.Keys)
+                player.Invoke(() => SendInventoryUpdate(player), UnityEngine.Random.Range(0f, 1f));
+            }
+        }
+
+        private void RegisterAsItemSupplier()
+        {
+            ItemRetriever?.Call("API_AddSupplier", this, new Dictionary<string, object>
+            {
+                ["Priority"] = -10,
+
+                ["SumPlayerItems"] = new Func<BasePlayer, Dictionary<string, object>, int>((player, rawItemQuery) =>
                 {
-                    if (_items.ContainsKey(shortName))
-                        continue;
+                    var ruleset = _rulesetManager.Get(player);
+                    if (ruleset == null)
+                        return 0;
 
-                    var itemDef = ItemManager.FindItemDefinition(shortName);
-                    if (itemDef == null)
-                    {
-                        LogWarning($"Invalid item in config: {shortName}");
-                        continue;
-                    }
+                    var itemQuery = ItemQuery.Parse(rawItemQuery);
+                    return ruleset.SumItems(ref itemQuery);
+                }),
 
-                    var item = ItemManager.Create(itemDef);
+                ["TakePlayerItems"] = new Func<BasePlayer, Dictionary<string, object>, int, List<Item>, int>((player, rawItemQuery, amount, collect) =>
+                {
+                    var ruleset = _rulesetManager.Get(player);
+                    if (ruleset == null)
+                        return 0;
 
-                    var heldEntity = item.GetHeldEntity();
-                    if (heldEntity != null)
-                        heldEntity.EnableSaving(false);
+                    var itemQuery = ItemQuery.Parse(rawItemQuery);
+                    return ruleset.TakeItems(ref itemQuery, amount, collect);
+                }),
 
-                    _items[shortName] = item;
+                ["SerializeForNetwork"] = new Action<BasePlayer, List<ProtoBuf.Item>>((player, saveList) =>
+                {
+                    _rulesetManager.Get(player)?.SerializeForNetwork(saveList);
+                }),
+            });
+        }
+
+        #endregion
+
+        #region Ruleset Manager
+
+        private class RulesetManager
+        {
+            private VirtualItems _plugin;
+
+            private Dictionary<ulong, Ruleset> _rulesetByPlayer = new Dictionary<ulong, Ruleset>();
+
+            public RulesetManager(VirtualItems plugin)
+            {
+                _plugin = plugin;
+            }
+
+            public Ruleset Get(BasePlayer player)
+            {
+                Ruleset ruleset;
+                if (!_rulesetByPlayer.TryGetValue(player.userID, out ruleset))
+                {
+                    ruleset = _plugin._config.DetermineBestRuleset(_plugin.permission, player);
+                    _rulesetByPlayer[player.userID] = ruleset;
                 }
+
+                return ruleset;
             }
-        }
 
-        private bool TryGetItem(string shortName, int amount, out Item item)
-        {
-            if (!_items.TryGetValue(shortName, out item))
-                return false;
-
-            item.amount = amount;
-            return true;
-        }
-
-        private int HighestUsedSlot(ProtoBuf.ItemContainer containerData)
-        {
-            var highestUsedSlot = -1;
-
-            foreach (var item in containerData.contents)
+            public void Remove(BasePlayer player)
             {
-                if (item.slot > highestUsedSlot)
-                    highestUsedSlot = item.slot;
+                _rulesetByPlayer.Remove(player.userID);
             }
 
-            return highestUsedSlot;
+            public void Clear()
+            {
+                _rulesetByPlayer.Clear();
+            }
         }
 
-        private void AddItems(ProtoBuf.ItemContainer containerData, Ruleset ruleset)
+        #endregion
+
+        #region Item Query
+
+        private struct ItemQuery
         {
-            if (containerData == null)
-                return;
-
-            // Note: Problems can arise if there are existing items spread out unevenly across the invisible slots.
-            var slot = Math.Max(FirstInvisibleItemSlot, HighestUsedSlot(containerData) + 1);
-
-            foreach (var entry in ruleset.ItemAmounts)
+            public static ItemQuery Parse(Dictionary<string, object> raw)
             {
-                Item item;
-                if (!TryGetItem(entry.Key, entry.Value, out item))
-                    continue;
+                var itemQuery = new ItemQuery();
 
-                item.position = slot++;
-                containerData.contents.Add(item.Save());
+                GetOption(raw, "BlueprintId", out itemQuery.BlueprintId);
+                GetOption(raw, "DisplayName", out itemQuery.DisplayName);
+                GetOption(raw, "DataInt", out itemQuery.DataInt);
+                GetOption(raw, "FlagsContain", out itemQuery.FlagsContain);
+                GetOption(raw, "FlagsEqual", out itemQuery.FlagsEqual);
+                GetOption(raw, "ItemId", out itemQuery.ItemId);
+                GetOption(raw, "SkinId", out itemQuery.SkinId);
+
+                return itemQuery;
             }
 
-            containerData.slots = FirstInvisibleItemSlot + ruleset.ItemAmounts.Count;
+            private static void GetOption<T>(Dictionary<string, object> dict, string key, out T result)
+            {
+                object value;
+                result = dict.TryGetValue(key, out value) && value is T
+                    ? (T)value
+                    : default(T);
+            }
+
+            public int? BlueprintId;
+            public int? DataInt;
+            public string DisplayName;
+            public Item.Flag? FlagsContain;
+            public Item.Flag? FlagsEqual;
+            public int? ItemId;
+            public ulong? SkinId;
+        }
+
+        #endregion
+
+        #region Utilities
+
+        private static class StringUtils
+        {
+            public static bool Equals(string a, string b) =>
+                string.Compare(a, b, StringComparison.OrdinalIgnoreCase) == 0;
         }
 
         #endregion
 
         #region Configuration
 
-        private Ruleset GetPlayerRuleset(string userIdString)
+        [JsonObject(MemberSerialization.OptIn)]
+        private class Ruleset
         {
-            if (_pluginConfig.Rulesets == null || _pluginConfig.Rulesets.Length == 0)
-                return null;
-
-            for (var i = 0; i < _pluginConfig.Rulesets.Length; i++)
+            private class ItemInfo
             {
-                var ruleset = _pluginConfig.Rulesets[i];
-                var perm = ruleset.GetPermission();
-                if (perm != null && permission.UserHasPermission(userIdString, perm))
-                    return ruleset;
+                public int Amount { get; }
+                private ItemDefinition _itemDefinition;
+                private ProtoBuf.Item _itemData;
+
+                public ItemInfo(ItemDefinition itemDefinition, int amount)
+                {
+                    _itemDefinition = itemDefinition;
+                    Amount = amount;
+                }
+
+                public void SerializeForNetwork(List<ProtoBuf.Item> saveList)
+                {
+                    if (_itemData == null)
+                    {
+                        _itemData = Facepunch.Pool.Get<ProtoBuf.Item>();
+                        _itemData.ShouldPool = false;
+                        _itemData.itemid = _itemDefinition.itemid;
+                        _itemData.amount = Amount;
+                    }
+
+                    saveList.Add(_itemData);
+                }
+
+                public Item Create(int amount)
+                {
+                    return ItemManager.Create(_itemDefinition, amount);
+                }
             }
 
-            return null;
+            [JsonProperty("Name")]
+            public string Name;
+
+            [JsonProperty("Items")]
+            public Dictionary<string, int> ItemAmounts = new Dictionary<string, int>();
+
+            [JsonIgnore]
+            private Dictionary<int, ItemInfo> _itemCacheById = new Dictionary<int, ItemInfo>();
+
+            [JsonIgnore]
+            private List<ItemInfo> _itemCacheList = new List<ItemInfo>();
+
+            [JsonIgnore]
+            public string Permission { get; private set; }
+
+            public void Init(VirtualItems plugin)
+            {
+                if (string.IsNullOrWhiteSpace(Name))
+                    return;
+
+                Permission = $"{PermissionRulesetPrefix}.{Name}";
+                plugin.permission.RegisterPermission(Permission, plugin);
+
+                foreach (var itemAmount in ItemAmounts)
+                {
+                    var itemShortName = itemAmount.Key;
+                    var amount = itemAmount.Value;
+
+                    var itemDefinition = ItemManager.FindItemDefinition(itemShortName);
+                    if (itemDefinition == null)
+                    {
+                        plugin.LogError($"Invalid item short name in config: {itemShortName}");
+                        continue;
+                    }
+
+                    if (_itemCacheById.ContainsKey(itemDefinition.itemid))
+                    {
+                        plugin.LogWarning($"Duplicate item in ruleset {Name}: {itemShortName}");
+                        continue;
+                    }
+
+                    var itemInfo = new ItemInfo(itemDefinition, amount);
+
+                    _itemCacheById[itemDefinition.itemid] = itemInfo;
+                    _itemCacheList.Add(itemInfo);
+                }
+            }
+
+            private ItemInfo GetItemInfo(ref ItemQuery itemQuery)
+            {
+                // If a plugin is not searching by item id, we can't consider any item a match.
+                if (!itemQuery.ItemId.HasValue)
+                    return null;
+
+                // If a plugin is searching by other criteria, we can't consider any item a match.
+                if (itemQuery.SkinId.HasValue && itemQuery.SkinId.Value != 0)
+                    return null;
+
+                if (itemQuery.BlueprintId.HasValue)
+                    return null;
+
+                if (itemQuery.DataInt.HasValue && itemQuery.DataInt != 0)
+                    return null;
+
+                if (itemQuery.FlagsContain.HasValue && itemQuery.FlagsContain != 0)
+                    return null;
+
+                if (itemQuery.FlagsEqual.HasValue && itemQuery.FlagsEqual != 0)
+                    return null;
+
+                if (itemQuery.DisplayName != null)
+                    return null;
+
+                ItemInfo itemInfo;
+                return _itemCacheById.TryGetValue(itemQuery.ItemId.Value, out itemInfo)
+                    ? itemInfo
+                    : null;
+            }
+
+            public int SumItems(ref ItemQuery itemQuery)
+            {
+                return GetItemInfo(ref itemQuery)?.Amount ?? 0;
+            }
+
+            public int TakeItems(ref ItemQuery itemQuery, int amount, List<Item> collect)
+            {
+                var itemInfo = GetItemInfo(ref itemQuery);
+                if (itemInfo == null)
+                    return 0;
+
+                amount = Math.Min(amount, itemInfo.Amount);
+                collect?.Add(itemInfo.Create(amount));
+                return amount;
+            }
+
+            public void SerializeForNetwork(List<ProtoBuf.Item> saveList)
+            {
+                for (var i = 0; i < _itemCacheList.Count; i++)
+                {
+                    _itemCacheList[i].SerializeForNetwork(saveList);
+                }
+            }
         }
 
-        private class Configuration : SerializableConfiguration
+        [JsonObject(MemberSerialization.OptIn)]
+        private class Configuration : BaseConfiguration
         {
             [JsonProperty("Rulesets")]
-            public Ruleset[] Rulesets = new Ruleset[]
+            private Ruleset[] Rulesets =
             {
-                new Ruleset()
+                new Ruleset
                 {
                     Name = "build",
                     ItemAmounts =
                     {
-                        ["wood"] = 100000,
-                        ["stones"] = 100000,
                         ["metal.fragments"] = 100000,
                         ["metal.refined"] = 100000,
+                        ["stones"] = 100000,
+                        ["wood"] = 100000,
                     }
                 },
-                new Ruleset()
+                new Ruleset
                 {
                     Name = "craft_most_items",
                     ItemAmounts =
@@ -383,19 +422,19 @@ namespace Oxide.Plugins
                         ["semibody"] = 100000,
                         ["sewingkit"] = 100000,
                         ["sheetmetal"] = 100000,
-                        ["skull.wolf"] = 100000,
                         ["skull.human"] = 100000,
+                        ["skull.wolf"] = 100000,
                         ["smgbody"] = 100000,
                         ["spear.wooden"] = 100000,
-                        ["syringe.medical"] = 100000,
                         ["stash.small"] = 100000,
                         ["stones"] = 100000,
+                        ["syringe.medical"] = 100000,
                         ["targeting.computer"] = 100000,
                         ["tarp"] = 100000,
                         ["wood"] = 100000,
                     }
                 },
-                new Ruleset()
+                new Ruleset
                 {
                     Name = "craft_all_items",
                     ItemAmounts =
@@ -425,18 +464,18 @@ namespace Oxide.Plugins
                         ["riflebody"] = 100000,
                         ["roadsigns"] = 100000,
                         ["rope"] = 100000,
+                        ["scrap"] = 100000,
                         ["semibody"] = 100000,
                         ["sewingkit"] = 100000,
                         ["sheetmetal"] = 100000,
-                        ["skull.wolf"] = 100000,
                         ["skull.human"] = 100000,
+                        ["skull.wolf"] = 100000,
                         ["smgbody"] = 100000,
                         ["spear.wooden"] = 100000,
-                        ["syringe.medical"] = 100000,
                         ["stash.small"] = 100000,
                         ["stones"] = 100000,
                         ["sulfur"] = 100000,
-                        ["scrap"] = 100000,
+                        ["syringe.medical"] = 100000,
                         ["targeting.computer"] = 100000,
                         ["tarp"] = 100000,
                         ["techparts"] = 100000,
@@ -444,111 +483,39 @@ namespace Oxide.Plugins
                     }
                 }
             };
-        }
 
-        private class Ruleset
-        {
-            [JsonProperty("Name")]
-            public string Name;
-
-            [JsonProperty("ItemAmounts")]
-            public Dictionary<string, int> ItemAmounts = new Dictionary<string, int>();
-
-            private string _permissionName;
-            public string GetPermission()
+            public void Init(VirtualItems plugin)
             {
-                if (_permissionName == null && !string.IsNullOrWhiteSpace(Name))
-                    _permissionName = string.Format(PermissionRulesetFormat, Name);
-
-                return _permissionName;
-            }
-
-            public int GetFreeAmount(string shortname)
-            {
-                int freeAmount;
-                return ItemAmounts.TryGetValue(shortname, out freeAmount)
-                    ? freeAmount
-                    : 0;
-            }
-
-            public int GetFreeAmount(ItemDefinition itemDefinition) =>
-                GetFreeAmount(itemDefinition.shortname);
-
-            public int GetFreeAmount(ItemAmount itemAmount) =>
-                GetFreeAmount(itemAmount.itemDef);
-
-            public int GetChargeAmount(ItemAmount itemAmount, int quantity = 1) =>
-                (int)itemAmount.amount * quantity - GetFreeAmount(itemAmount);
-
-            public bool PlayerHasAmount(BasePlayer player, ItemDefinition itemDefinition, int requiredAmount)
-            {
-                var freeAmount = GetFreeAmount(itemDefinition);
-                if (freeAmount >= requiredAmount)
-                    return true;
-
-                return player.inventory.GetAmount(itemDefinition.itemid) + freeAmount >= requiredAmount;
-            }
-
-            public bool PlayerHasAmountList(BasePlayer player, IEnumerable<ItemAmount> itemAmountList, float costFraction = 1)
-            {
-                foreach (var itemAmount in itemAmountList)
+                foreach (var ruleset in Rulesets)
                 {
-                    if (!PlayerHasAmount(player, itemAmount.itemDef, Mathf.CeilToInt(itemAmount.amount * costFraction)))
-                        return false;
+                    ruleset.Init(plugin);
                 }
-                return true;
             }
 
-            public void TakePlayerItem(List<Item> collect, BasePlayer player, ItemAmount itemAmount)
+            public Ruleset DetermineBestRuleset(Permission permission, BasePlayer player)
             {
-                var chargeAmount = GetChargeAmount(itemAmount);
-                if (chargeAmount <= 0)
-                    return;
+                if (Rulesets == null)
+                    return null;
 
-                player.inventory.Take(collect, itemAmount.itemDef.itemid, chargeAmount);
-                player.Command("note.inv", itemAmount.itemDef.itemid, chargeAmount * -1);
-            }
-
-            public void TakePlayerItemList(BasePlayer player, IEnumerable<ItemAmount> itemAmountList)
-            {
-                var collect = Facepunch.Pool.GetList<Item>();
-
-                foreach (var itemAmount in itemAmountList)
-                    TakePlayerItem(collect, player, itemAmount);
-
-                foreach (var item in collect)
-                    item.Remove();
-
-                Facepunch.Pool.FreeList(ref collect);
-            }
-
-            public void TakeFromContainers(IEnumerable<ItemContainer> containerList, IEnumerable<ItemAmount> itemAmountList, int craftAmount, List<Item> collect)
-            {
-                foreach (var itemAmount in itemAmountList)
+                for (var i = Rulesets.Length - 1; i >= 0; i--)
                 {
-                    var chargeAmount = GetChargeAmount(itemAmount, craftAmount);
-                    if (chargeAmount <= 0)
-                        continue;
-
-                    foreach (var container in containerList)
-                    {
-                        chargeAmount -= container.Take(collect, itemAmount.itemid, chargeAmount);
-                        if (chargeAmount <= 0)
-                            break;
-                    }
+                    var ruleset = Rulesets[i];
+                    if (ruleset.Permission != null && permission.UserHasPermission(player.UserIDString, ruleset.Permission))
+                        return ruleset;
                 }
+
+                return null;
             }
         }
 
         private Configuration GetDefaultConfig() => new Configuration();
 
-        #endregion
+        #region Configuration Helpers
 
-        #region Configuration Boilerplate
-
-        private class SerializableConfiguration
+        [JsonObject(MemberSerialization.OptIn)]
+        private class BaseConfiguration
         {
-            public string ToJson() => JsonConvert.SerializeObject(this);
+            private string ToJson() => JsonConvert.SerializeObject(this);
 
             public Dictionary<string, object> ToDictionary() => JsonHelper.Deserialize(ToJson()) as Dictionary<string, object>;
         }
@@ -575,14 +542,14 @@ namespace Oxide.Plugins
             }
         }
 
-        private bool MaybeUpdateConfig(SerializableConfiguration config)
+        private bool MaybeUpdateConfig(BaseConfiguration config)
         {
             var currentWithDefaults = config.ToDictionary();
             var currentRaw = Config.ToDictionary(x => x.Key, x => x.Value);
-            return MaybeUpdateConfigDict(currentWithDefaults, currentRaw);
+            return MaybeUpdateConfigSection(currentWithDefaults, currentRaw);
         }
 
-        private bool MaybeUpdateConfigDict(Dictionary<string, object> currentWithDefaults, Dictionary<string, object> currentRaw)
+        private bool MaybeUpdateConfigSection(Dictionary<string, object> currentWithDefaults, Dictionary<string, object> currentRaw)
         {
             bool changed = false;
 
@@ -601,7 +568,7 @@ namespace Oxide.Plugins
                             currentRaw[key] = currentWithDefaults[key];
                             changed = true;
                         }
-                        else if (MaybeUpdateConfigDict(defaultDictValue, currentDictValue))
+                        else if (MaybeUpdateConfigSection(defaultDictValue, currentDictValue))
                             changed = true;
                     }
                 }
@@ -615,37 +582,40 @@ namespace Oxide.Plugins
             return changed;
         }
 
-        protected override void LoadDefaultConfig() => _pluginConfig = GetDefaultConfig();
+        protected override void LoadDefaultConfig() => _config = GetDefaultConfig();
 
         protected override void LoadConfig()
         {
             base.LoadConfig();
             try
             {
-                _pluginConfig = Config.ReadObject<Configuration>();
-                if (_pluginConfig == null)
+                _config = Config.ReadObject<Configuration>();
+                if (_config == null)
                 {
                     throw new JsonException();
                 }
 
-                if (MaybeUpdateConfig(_pluginConfig))
+                if (MaybeUpdateConfig(_config))
                 {
-                    LogWarning("Configuration appears to be outdated; updating and saving");
+                    PrintWarning("Configuration appears to be outdated; updating and saving");
                     SaveConfig();
                 }
             }
-            catch
+            catch (Exception e)
             {
-                LogWarning($"Configuration file {Name}.json is invalid; using defaults");
+                PrintError(e.Message);
+                PrintWarning($"Configuration file {Name}.json is invalid; using defaults");
                 LoadDefaultConfig();
             }
         }
 
         protected override void SaveConfig()
         {
-            Log($"Configuration changes saved to {Name}.json");
-            Config.WriteObject(_pluginConfig, true);
+            Puts($"Configuration changes saved to {Name}.json");
+            Config.WriteObject(_config, true);
         }
+
+        #endregion
 
         #endregion
     }
