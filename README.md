@@ -5,13 +5,13 @@
 
 ## Required dependencies
 
-- Item Retriever -- Simply install. No configuration or permissions needed.
+- [Item Retriever](https://umod.org/plugins/virtual-items) -- Simply install. No configuration or permissions needed.
 
 ## How it works
 
 Players may be granted virtual resources such as wood, stones, etc. When a player has a virtual resource, they can perform most actions that require the resource, without having that resource in their inventory. Even if the required resource is in their inventory, it won't be consumed, unless the amount you granted is insufficient for the action.
 
-For example, let's say you grant a player `100` virtual `wood`. That player will be able to craft a Wood Storage Box as many times as they want, without any cost, because it requires only `100` `wood` to craft and because virtual items are never depleted. However, if the player wants to craft a `Tool Cupboard` which requires `1000` `wood`, they will need at least `900` wood in their inventory, and `900` will be consumed.
+For example, let's say you grant a player `100` virtual `wood`. That player will be able to craft a Wood Storage Box as many times as they want, without any cost, because it requires only `100`&nbsp;`wood` to craft and because virtual items are never depleted. However, if the player wants to craft a `Tool Cupboard` which requires `1000`&nbsp;`wood`, they will need at least `900` wood in their inventory, and `900` will be consumed.
 
 ### Supported actions
 
