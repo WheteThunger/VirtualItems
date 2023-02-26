@@ -248,7 +248,7 @@ namespace Oxide.Plugins
                 {
                     if (_itemData == null)
                     {
-                        _itemData = Facepunch.Pool.Get<ProtoBuf.Item>();
+                        _itemData = new ProtoBuf.Item();
                         _itemData.ShouldPool = false;
                         _itemData.itemid = _itemDefinition.itemid;
                         _itemData.amount = Amount;
