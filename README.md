@@ -5,7 +5,7 @@
 
 ## Required dependencies
 
-- [Item Retriever](https://umod.org/plugins/virtual-items) -- Simply install. No configuration or permissions needed.
+- [Item Retriever](https://umod.org/plugins/item-retriever) -- Simply install. No configuration or permissions needed.
 
 ## How it works
 
