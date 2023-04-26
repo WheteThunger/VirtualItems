@@ -8,7 +8,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.2.0")]
+    [Info("Virtual Items", "WhiteThunder", "0.3.0")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -20,7 +20,9 @@ namespace Oxide.Plugins
         private readonly Plugin ItemRetriever;
 
         private Configuration _config;
-        private RulesetManager _rulesetManager;
+        private readonly RulesetManager _rulesetManager;
+
+        private readonly object True = true;
 
         public VirtualItems()
         {
@@ -97,6 +99,21 @@ namespace Oxide.Plugins
             {
                 _rulesetManager.Clear();
             }
+        }
+
+        private object OnPayForPlacement(BasePlayer player, Planner planner)
+        {
+            var item = planner.GetItem();
+            if (item == null)
+                return null;
+
+            var ruleset = _rulesetManager.Get(player);
+            if (ruleset == null)
+                return null;
+
+            return ruleset.AllDeployablesFree || ruleset.HasItem(item)
+                ? True
+                : null;
         }
 
         #endregion
@@ -266,6 +283,9 @@ namespace Oxide.Plugins
             [JsonProperty("Name")]
             public string Name;
 
+            [JsonProperty("All deployables are free")]
+            public bool AllDeployablesFree;
+
             [JsonProperty("Items")]
             public Dictionary<string, int> ItemAmounts = new Dictionary<string, int>();
 
@@ -342,6 +362,11 @@ namespace Oxide.Plugins
                     : null;
             }
 
+            public bool HasItem(Item item)
+            {
+                return _itemCacheById.ContainsKey(item.info.itemid);
+            }
+
             public int SumItems(ref ItemQuery itemQuery)
             {
                 return GetItemInfo(ref itemQuery)?.Amount ?? 0;
@@ -376,6 +401,7 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "build",
+                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["metal.fragments"] = 100000,
@@ -387,6 +413,7 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "craft_most_items",
+                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["bone.fragments"] = 100000,
@@ -427,6 +454,7 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "craft_all_items",
+                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["bone.fragments"] = 100000,
