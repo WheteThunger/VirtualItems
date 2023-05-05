@@ -8,7 +8,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.3.0")]
+    [Info("Virtual Items", "WhiteThunder", "0.3.1")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -103,6 +103,9 @@ namespace Oxide.Plugins
 
         private object OnPayForPlacement(BasePlayer player, Planner planner)
         {
+            if (!planner.isTypeDeployable)
+                return null;
+
             var item = planner.GetItem();
             if (item == null)
                 return null;
