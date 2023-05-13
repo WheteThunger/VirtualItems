@@ -61,7 +61,8 @@ You may define additional rulesets in the config. Each one will generate a permi
   "Rulesets": [
     {
       "Name": "build",
-      "All deployables are free": true,
+      "All deployables are free": false,
+      "Free deployables": [],
       "Items": {
         "metal.fragments": 100000,
         "metal.refined": 100000,
@@ -71,7 +72,8 @@ You may define additional rulesets in the config. Each one will generate a permi
     },
     {
       "Name": "craft_most_items",
-      "All deployables are free": true,
+      "All deployables are free": false,
+      "Free deployables": [],
       "Items": {
         "bone.fragments": 100000,
         "can.tuna.empty": 100000,
@@ -110,7 +112,8 @@ You may define additional rulesets in the config. Each one will generate a permi
     },
     {
       "Name": "craft_all_items",
-      "All deployables are free": true,
+      "All deployables are free": false,
+      "Free deployables": [],
       "Items": {
         "bone.fragments": 100000,
         "can.tuna.empty": 100000,
@@ -159,7 +162,8 @@ You may define additional rulesets in the config. Each one will generate a permi
 }
 ```
 
-- `Rulesets` -- List of permission-based rulesets that determine how many of each ingredient players can have for free. Each ruleset defined here generates a permission of the format `virtualitems.ruleset.<name>`. Granting a ruleset to a player determines which ingredients they will have for free. Granting multiple rulesets to a player will cause only the last to apply (based on the order in the config).
+- `Rulesets` -- Each ruleset determines how many of each ingredient players can have for free, as well as whether any items are free to deploy. Each ruleset defined here generates a permission of the format `virtualitems.ruleset.<name>`. Granting a ruleset to a player determines which items/ingredients they will have for free. Granting multiple rulesets to a player will cause only the last to apply (based on the order in the config).
   - `Name` -- Name of the ruleset. This determines the generated permission: `virtualitems.ruleset.<name>`.
-  - `All deployables are free` (`true` or `false`) -- While `true`, deploying all items are free (doesn't consume the item), even if the item is not defined in the ruleset. While `false`, only deployables defined in the ruleset are free.
-  - `Items` -- This map determines the amount of each ingredient (item short name) that players with this ruleset will have.
+  - `All deployables are free` (`true` or `false`) -- While `true`, deploying any item won't consume the item, allowing the player to repeatedly deploy it as many times as they want, without having to craft more. If you don't want all deployables to be free, you can instead specify the item short names under `Free deployables`.
+  - `Free deployables` -- If you want to allow only select items to be deployed for free, as an alternative to `All deployables are free`, specify the item short names here.
+  - `Items` -- This section determines the amount of each item/ingredient (item short name) that players with this ruleset will have.

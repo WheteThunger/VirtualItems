@@ -4,11 +4,12 @@ using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Oxide.Core;
 using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.3.1")]
+    [Info("Virtual Items", "WhiteThunder", "0.4.0")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -36,6 +37,11 @@ namespace Oxide.Plugins
         private void Init()
         {
             _config.Init(this);
+
+            if (!_config.AnyRulesetHasFreeDeployables)
+            {
+                Unsubscribe(nameof(OnPayForPlacement));
+            }
         }
 
         private void OnServerInitialized()
@@ -114,7 +120,7 @@ namespace Oxide.Plugins
             if (ruleset == null)
                 return null;
 
-            return ruleset.AllDeployablesFree || ruleset.HasItem(item)
+            return ruleset.HasFreeDeployable(item)
                 ? True
                 : null;
         }
@@ -122,6 +128,11 @@ namespace Oxide.Plugins
         #endregion
 
         #region Helper Methods
+
+        public static void LogDebug(string message) => Interface.Oxide.LogDebug($"[Virtual Items] {message}");
+        public static void LogInfo(string message) => Interface.Oxide.LogInfo($"[Virtual Items] {message}");
+        public static void LogWarning(string message) => Interface.Oxide.LogWarning($"[Virtual Items] {message}");
+        public static void LogError(string message) => Interface.Oxide.LogError($"[Virtual Items] {message}");
 
         private static void SendInventoryUpdate(BasePlayer player)
         {
@@ -289,8 +300,14 @@ namespace Oxide.Plugins
             [JsonProperty("All deployables are free")]
             public bool AllDeployablesFree;
 
+            [JsonProperty("Free deployables")]
+            public string[] FreeDeployables = Array.Empty<string>();
+
             [JsonProperty("Items")]
             public Dictionary<string, int> ItemAmounts = new Dictionary<string, int>();
+
+            [JsonIgnore]
+            private HashSet<int> _freeDeployableIds = new HashSet<int>();
 
             [JsonIgnore]
             private Dictionary<int, ItemInfo> _itemCacheById = new Dictionary<int, ItemInfo>();
@@ -301,6 +318,9 @@ namespace Oxide.Plugins
             [JsonIgnore]
             public string Permission { get; private set; }
 
+            [JsonIgnore]
+            public bool HasAnyFreeDeployables => AllDeployablesFree || _freeDeployableIds.Count > 0;
+
             public void Init(VirtualItems plugin)
             {
                 if (string.IsNullOrWhiteSpace(Name))
@@ -309,29 +329,73 @@ namespace Oxide.Plugins
                 Permission = $"{PermissionRulesetPrefix}.{Name}";
                 plugin.permission.RegisterPermission(Permission, plugin);
 
+                foreach (var itemShortName in FreeDeployables)
+                {
+                    ItemDefinition itemDefinition;
+                    if (!VerifyValidItem(itemShortName, out itemDefinition))
+                        continue;
+
+                    _freeDeployableIds.Add(itemDefinition.itemid);
+                }
+
                 foreach (var itemAmount in ItemAmounts)
                 {
                     var itemShortName = itemAmount.Key;
                     var amount = itemAmount.Value;
 
-                    var itemDefinition = ItemManager.FindItemDefinition(itemShortName);
-                    if (itemDefinition == null)
-                    {
-                        plugin.LogError($"Invalid item short name in config: {itemShortName}");
+                    ItemDefinition itemDefinition;
+                    if (!VerifyValidItem(itemShortName, out itemDefinition))
                         continue;
-                    }
 
                     if (_itemCacheById.ContainsKey(itemDefinition.itemid))
                     {
-                        plugin.LogWarning($"Duplicate item in ruleset {Name}: {itemShortName}");
+                        LogWarning($"Duplicate item in ruleset {Name}: {itemShortName}");
                         continue;
                     }
 
                     var itemInfo = new ItemInfo(itemDefinition, amount);
-
                     _itemCacheById[itemDefinition.itemid] = itemInfo;
                     _itemCacheList.Add(itemInfo);
                 }
+            }
+
+            public bool HasFreeDeployable(Item item)
+            {
+                return AllDeployablesFree || _freeDeployableIds.Contains(item.info.itemid);
+            }
+
+            public int SumItems(ref ItemQuery itemQuery)
+            {
+                return GetItemInfo(ref itemQuery)?.Amount ?? 0;
+            }
+
+            public int TakeItems(ref ItemQuery itemQuery, int amount, List<Item> collect)
+            {
+                var itemInfo = GetItemInfo(ref itemQuery);
+                if (itemInfo == null)
+                    return 0;
+
+                amount = Math.Min(amount, itemInfo.Amount);
+                collect?.Add(itemInfo.Create(amount));
+                return amount;
+            }
+
+            public void SerializeForNetwork(List<ProtoBuf.Item> saveList)
+            {
+                for (var i = 0; i < _itemCacheList.Count; i++)
+                {
+                    _itemCacheList[i].SerializeForNetwork(saveList);
+                }
+            }
+
+            private bool VerifyValidItem(string itemShortName, out ItemDefinition itemDefinition)
+            {
+                itemDefinition = ItemManager.FindItemDefinition(itemShortName);
+                if (itemDefinition != null)
+                    return true;
+
+                LogError($"Invalid item short name in config: {itemShortName}");
+                return false;
             }
 
             private ItemInfo GetItemInfo(ref ItemQuery itemQuery)
@@ -364,35 +428,6 @@ namespace Oxide.Plugins
                     ? itemInfo
                     : null;
             }
-
-            public bool HasItem(Item item)
-            {
-                return _itemCacheById.ContainsKey(item.info.itemid);
-            }
-
-            public int SumItems(ref ItemQuery itemQuery)
-            {
-                return GetItemInfo(ref itemQuery)?.Amount ?? 0;
-            }
-
-            public int TakeItems(ref ItemQuery itemQuery, int amount, List<Item> collect)
-            {
-                var itemInfo = GetItemInfo(ref itemQuery);
-                if (itemInfo == null)
-                    return 0;
-
-                amount = Math.Min(amount, itemInfo.Amount);
-                collect?.Add(itemInfo.Create(amount));
-                return amount;
-            }
-
-            public void SerializeForNetwork(List<ProtoBuf.Item> saveList)
-            {
-                for (var i = 0; i < _itemCacheList.Count; i++)
-                {
-                    _itemCacheList[i].SerializeForNetwork(saveList);
-                }
-            }
         }
 
         [JsonObject(MemberSerialization.OptIn)]
@@ -404,7 +439,6 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "build",
-                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["metal.fragments"] = 100000,
@@ -416,7 +450,6 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "craft_most_items",
-                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["bone.fragments"] = 100000,
@@ -457,7 +490,6 @@ namespace Oxide.Plugins
                 new Ruleset
                 {
                     Name = "craft_all_items",
-                    AllDeployablesFree = true,
                     ItemAmounts =
                     {
                         ["bone.fragments"] = 100000,
@@ -504,6 +536,21 @@ namespace Oxide.Plugins
                     }
                 }
             };
+
+            [JsonIgnore]
+            public bool AnyRulesetHasFreeDeployables
+            {
+                get
+                {
+                    foreach (var ruleset in Rulesets)
+                    {
+                        if (ruleset.HasAnyFreeDeployables)
+                            return true;
+                    }
+
+                    return false;
+                }
+            }
 
             public void Init(VirtualItems plugin)
             {
