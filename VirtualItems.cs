@@ -9,7 +9,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.4.0")]
+    [Info("Virtual Items", "WhiteThunder", "0.5.0")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -53,12 +53,12 @@ namespace Oxide.Plugins
             }
 
             RegisterAsItemSupplier();
-
             UpdatePlayerInventories();
         }
 
         private void Unload()
         {
+            _rulesetManager.Unload();
             UpdatePlayerInventories();
         }
 
@@ -67,6 +67,7 @@ namespace Oxide.Plugins
             if (plugin.Name == nameof(ItemRetriever))
             {
                 RegisterAsItemSupplier();
+                UpdatePlayerInventories();
             }
         }
 
@@ -173,6 +174,16 @@ namespace Oxide.Plugins
                     return ruleset.TakeItems(ref itemQuery, amount, collect);
                 }),
 
+                ["FindPlayerItems"] = new Action<BasePlayer, Dictionary<string, object>, List<Item>>((player, rawItemQuery, collect) =>
+                {
+                    var ruleset = _rulesetManager.Get(player);
+                    if (ruleset == null)
+                        return;
+
+                    var itemQuery = ItemQuery.Parse(rawItemQuery);
+                    ruleset.FindItems(ref itemQuery, collect);
+                }),
+
                 ["SerializeForNetwork"] = new Action<BasePlayer, List<ProtoBuf.Item>>((player, saveList) =>
                 {
                     _rulesetManager.Get(player)?.SerializeForNetwork(saveList);
@@ -182,13 +193,82 @@ namespace Oxide.Plugins
 
         #endregion
 
+        #region Item Pool
+
+        private class ItemPool
+        {
+            private readonly int _itemId;
+            private readonly List<Item> _availableItems = new List<Item>();
+            private readonly List<Item> _takenItems = new List<Item>();
+
+            public ItemPool(int itemId)
+            {
+                _itemId = itemId;
+            }
+
+            public Item Take()
+            {
+                ReturnUnusedItems();
+
+                Item item;
+
+                if (_availableItems.Count > 0)
+                {
+                    item = _availableItems[_availableItems.Count - 1];
+                    _availableItems.RemoveAt(_availableItems.Count - 1);
+                }
+                else
+                {
+                    item = ItemManager.CreateByItemID(_itemId);
+                }
+
+                _takenItems.Add(item);
+                return item;
+            }
+
+            public void ReturnUnusedItems()
+            {
+                for (var i = _takenItems.Count - 1; i >= 0; i--)
+                {
+                    var item = _takenItems[i];
+                    if (!IsUnused(item))
+                        continue;
+
+                    _takenItems.RemoveAt(i);
+                    _availableItems.Add(item);
+                }
+            }
+
+            public void Unload()
+            {
+                foreach (var item in _availableItems)
+                {
+                    item.Remove();
+                }
+
+                foreach (var item in _takenItems)
+                {
+                    if (IsUnused(item))
+                    {
+                        item.Remove();
+                    }
+                }
+            }
+
+            private bool IsUnused(Item item)
+            {
+                return item.parent == null && (object)item.GetWorldEntity() == null;
+            }
+        }
+
+        #endregion
+
         #region Ruleset Manager
 
         private class RulesetManager
         {
-            private VirtualItems _plugin;
-
-            private Dictionary<ulong, Ruleset> _rulesetByPlayer = new Dictionary<ulong, Ruleset>();
+            private readonly VirtualItems _plugin;
+            private readonly Dictionary<ulong, Ruleset> _rulesetByPlayer = new Dictionary<ulong, Ruleset>();
 
             public RulesetManager(VirtualItems plugin)
             {
@@ -215,6 +295,15 @@ namespace Oxide.Plugins
             public void Clear()
             {
                 _rulesetByPlayer.Clear();
+            }
+
+            public void Unload()
+            {
+                foreach (var ruleset in _rulesetByPlayer.Values)
+                {
+                    // Ruleset may be cached as null, for players with no assigned ruleset.
+                    ruleset?.Unload();
+                }
             }
         }
 
@@ -316,6 +405,9 @@ namespace Oxide.Plugins
             private List<ItemInfo> _itemCacheList = new List<ItemInfo>();
 
             [JsonIgnore]
+            private readonly Dictionary<int, ItemPool> _itemPoolByItemId = new Dictionary<int, ItemPool>();
+
+            [JsonIgnore]
             public string Permission { get; private set; }
 
             [JsonIgnore]
@@ -380,11 +472,34 @@ namespace Oxide.Plugins
                 return amount;
             }
 
+            public void FindItems(ref ItemQuery itemQuery, List<Item> collect)
+            {
+                // Only support item ids for now since only expecting Rust to call this.
+                if (!itemQuery.ItemId.HasValue)
+                    return;
+
+                var itemInfo = GetItemInfo(ref itemQuery);
+                if (itemInfo == null)
+                    return;
+
+                var item = GetItemPool(itemQuery.ItemId.Value).Take();
+                item.amount = itemInfo.Amount;
+                collect.Add(item);
+            }
+
             public void SerializeForNetwork(List<ProtoBuf.Item> saveList)
             {
                 for (var i = 0; i < _itemCacheList.Count; i++)
                 {
                     _itemCacheList[i].SerializeForNetwork(saveList);
+                }
+            }
+
+            public void Unload()
+            {
+                foreach (var itemPool in _itemPoolByItemId.Values)
+                {
+                    itemPool.Unload();
                 }
             }
 
@@ -428,6 +543,18 @@ namespace Oxide.Plugins
                     ? itemInfo
                     : null;
             }
+
+            private ItemPool GetItemPool(int itemId)
+            {
+                ItemPool itemPool;
+                if (!_itemPoolByItemId.TryGetValue(itemId, out itemPool))
+                {
+                    itemPool = new ItemPool(itemId);
+                    _itemPoolByItemId[itemId] = itemPool;
+                }
+
+                return itemPool;
+            }
         }
 
         [JsonObject(MemberSerialization.OptIn)]
@@ -446,6 +573,38 @@ namespace Oxide.Plugins
                         ["stones"] = 100000,
                         ["wood"] = 100000,
                     }
+                },
+                new Ruleset
+                {
+                    Name = "unlimited_ammo",
+                    ItemAmounts =
+                    {
+                        ["ammo.grenadelauncher.buckshot"] = 100000,
+                        ["ammo.grenadelauncher.he"] = 100000,
+                        ["ammo.grenadelauncher.smoke"] = 100000,
+                        ["ammo.handmade.shell"] = 100000,
+                        ["ammo.nailgun.nails"] = 100000,
+                        ["ammo.pistol"] = 100000,
+                        ["ammo.pistol.fire"] = 100000,
+                        ["ammo.pistol.hv"] = 100000,
+                        ["ammo.rifle"] = 100000,
+                        ["ammo.rifle.explosive"] = 100000,
+                        ["ammo.rifle.hv"] = 100000,
+                        ["ammo.rifle.incendiary"] = 100000,
+                        ["ammo.rocket.basic"] = 100000,
+                        ["ammo.rocket.fire"] = 100000,
+                        ["ammo.rocket.hv"] = 100000,
+                        ["ammo.rocket.smoke"] = 100000,
+                        ["ammo.shotgun"] = 100000,
+                        ["ammo.shotgun.fire"] = 100000,
+                        ["ammo.shotgun.slug"] = 100000,
+                        ["arrow.bone"] = 100000,
+                        ["arrow.fire"] = 100000,
+                        ["arrow.hv"] = 100000,
+                        ["arrow.wooden"] = 100000,
+                        ["snowball"] = 100000,
+                        ["speargun.spear"] = 100000,
+                    },
                 },
                 new Ruleset
                 {
@@ -525,6 +684,78 @@ namespace Oxide.Plugins
                         ["skull.wolf"] = 100000,
                         ["smgbody"] = 100000,
                         ["spear.wooden"] = 100000,
+                        ["stash.small"] = 100000,
+                        ["stones"] = 100000,
+                        ["sulfur"] = 100000,
+                        ["syringe.medical"] = 100000,
+                        ["targeting.computer"] = 100000,
+                        ["tarp"] = 100000,
+                        ["techparts"] = 100000,
+                        ["wood"] = 100000,
+                    }
+                },
+                new Ruleset
+                {
+                    Name = "craft_all_items_unlimited_ammo",
+                    ItemAmounts =
+                    {
+                        ["ammo.grenadelauncher.buckshot"] = 100000,
+                        ["ammo.grenadelauncher.he"] = 100000,
+                        ["ammo.grenadelauncher.smoke"] = 100000,
+                        ["ammo.handmade.shell"] = 100000,
+                        ["ammo.nailgun.nails"] = 100000,
+                        ["ammo.pistol"] = 100000,
+                        ["ammo.pistol.fire"] = 100000,
+                        ["ammo.pistol.hv"] = 100000,
+                        ["ammo.rifle"] = 100000,
+                        ["ammo.rifle.explosive"] = 100000,
+                        ["ammo.rifle.hv"] = 100000,
+                        ["ammo.rifle.incendiary"] = 100000,
+                        ["ammo.rocket.basic"] = 100000,
+                        ["ammo.rocket.fire"] = 100000,
+                        ["ammo.rocket.hv"] = 100000,
+                        ["ammo.shotgun"] = 100000,
+                        ["ammo.shotgun.fire"] = 100000,
+                        ["ammo.shotgun.slug"] = 100000,
+                        ["arrow.bone"] = 100000,
+                        ["arrow.fire"] = 100000,
+                        ["arrow.hv"] = 100000,
+                        ["arrow.wooden"] = 100000,
+                        ["bone.fragments"] = 100000,
+                        ["can.tuna.empty"] = 100000,
+                        ["cctv.camera"] = 100000,
+                        ["charcoal"] = 100000,
+                        ["cloth"] = 100000,
+                        ["electric.rf.broadcaster"] = 100000,
+                        ["electric.rf.receiver"] = 100000,
+                        ["explosives"] = 100000,
+                        ["fat.animal"] = 100000,
+                        ["gears"] = 100000,
+                        ["grenade.beancan"] = 100000,
+                        ["gunpowder"] = 100000,
+                        ["ladder.wooden.wall"] = 100000,
+                        ["leather"] = 100000,
+                        ["lowgradefuel"] = 100000,
+                        ["metal.fragments"] = 100000,
+                        ["metal.refined"] = 100000,
+                        ["metalblade"] = 100000,
+                        ["metalpipe"] = 100000,
+                        ["metalspring"] = 100000,
+                        ["propanetank"] = 100000,
+                        ["pumpkin"] = 100000,
+                        ["riflebody"] = 100000,
+                        ["roadsigns"] = 100000,
+                        ["rope"] = 100000,
+                        ["scrap"] = 100000,
+                        ["semibody"] = 100000,
+                        ["sewingkit"] = 100000,
+                        ["sheetmetal"] = 100000,
+                        ["skull.human"] = 100000,
+                        ["skull.wolf"] = 100000,
+                        ["smgbody"] = 100000,
+                        ["snowball"] = 100000,
+                        ["spear.wooden"] = 100000,
+                        ["speargun.spear"] = 100000,
                         ["stash.small"] = 100000,
                         ["stones"] = 100000,
                         ["sulfur"] = 100000,
