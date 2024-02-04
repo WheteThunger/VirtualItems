@@ -9,7 +9,7 @@ using Oxide.Core.Libraries;
 
 namespace Oxide.Plugins
 {
-    [Info("Virtual Items", "WhiteThunder", "0.5.0")]
+    [Info("Virtual Items", "WhiteThunder", "0.5.1")]
     [Description("Removes resource costs of specific ingredients for crafting and building.")]
     internal class VirtualItems : CovalencePlugin
     {
@@ -164,6 +164,7 @@ namespace Oxide.Plugins
                     return ruleset.SumItems(ref itemQuery);
                 }),
 
+                // For Item Retriever v0.6.5.
                 ["TakePlayerItems"] = new Func<BasePlayer, Dictionary<string, object>, int, List<Item>, int>((player, rawItemQuery, amount, collect) =>
                 {
                     var ruleset = _rulesetManager.Get(player);
@@ -171,6 +172,23 @@ namespace Oxide.Plugins
                         return 0;
 
                     var itemQuery = ItemQuery.Parse(rawItemQuery);
+                    return ruleset.TakeItems(ref itemQuery, amount, collect);
+                }),
+
+                // For Item Retriever v0.7.0+.
+                ["TakePlayerItemsV2"] = new Func<BasePlayer, Dictionary<string, object>, int, List<Item>, ItemCraftTask, int>((player, rawItemQuery, amount, collect, itemCraftTask) =>
+                {
+                    var ruleset = _rulesetManager.Get(player);
+                    if (ruleset == null)
+                        return 0;
+
+                    var itemQuery = ItemQuery.Parse(rawItemQuery);
+                    if (itemCraftTask != null)
+                    {
+                        // Don't actually create items for crafting. Simply return up to the amount allowed.
+                        return Math.Min(amount, ruleset.SumItems(ref itemQuery));
+                    }
+
                     return ruleset.TakeItems(ref itemQuery, amount, collect);
                 }),
 
